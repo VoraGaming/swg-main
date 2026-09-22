@@ -3,3 +3,4 @@
 Dockerfile* text eol=lf
 docker-compose*.yml text eol=lf
 docs/*.md text eol=lf
+docker/host/** text eol=lf

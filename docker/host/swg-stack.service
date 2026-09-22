@@ -1,0 +1,57 @@
+# swg-stack.service - stop the SWG Docker stack in order (and save the game)
+# BEFORE Docker itself is stopped, e.g. on a host/LXC shutdown or reboot.
+#
+# Why this exists: when the host shuts down, dockerd stops every container at
+# the same time. Oracle (10 s default) could go down while swg-server is still
+# saving. This unit runs "docker compose stop" first. Compose stops services
+# in reverse dependency order: swg-auth, swg-control, swg-server (saves via
+# startServer.sh), and oracle last. Each one gets its own stop_grace_period.
+#
+# Install: see README.md in this folder. Copy to /etc/systemd/system/.
+
+[Unit]
+Description=SWG Docker stack (ordered stop so the game saves before Docker stops)
+Documentation=https://github.com/VoraGaming/swg-main/tree/x64-dx11-vanilla/docker/host
+# Ordering: systemd stops units in the REVERSE of their start order. Because
+# this unit starts After docker/containerd/network, it is stopped BEFORE them.
+After=docker.service containerd.service network-online.target
+Wants=network-online.target
+# Requires: if docker.service is stopped or restarted (for example by a Docker
+# package upgrade), this unit is stopped (clean save) and started again too.
+Requires=docker.service
+
+[Service]
+# oneshot + RemainAfterExit: ExecStart runs once and the unit then stays
+# "active" (with no process) until shutdown, when ExecStop runs.
+Type=oneshot
+RemainAfterExit=yes
+
+# Run as the normal "swg" user. It is in the docker group, so it can talk to
+# Docker without root, and it finds the same docker compose plugin and the
+# same .env file as when you type "docker compose" yourself.
+User=swg
+WorkingDirectory=/home/swg/swg-main
+
+# At boot: start the existing containers again. This is needed because
+# containers stopped with "docker compose stop" count as "stopped by hand",
+# so their "unless-stopped" restart policy will NOT start them after the
+# reboot. "start" only starts containers that already exist: it never builds
+# images and never recreates containers. On a stack that is already running
+# it does nothing, so "systemctl enable --now" is harmless.
+# The leading "-" means: if this fails, still mark the unit active, so the
+# ordered stop below still runs at the next shutdown.
+ExecStart=-/usr/bin/docker compose start
+
+# At shutdown: ordered stop. No "-t" option on purpose, so every service uses
+# its own stop_grace_period from the compose files (swg-server 180 s,
+# oracle 120 s once added, swg-auth/swg-control Docker's 10 s default).
+ExecStop=/usr/bin/docker compose stop
+
+# Oracle must be healthy before swg-server starts, which can take a while.
+TimeoutStartSec=300
+# Real stops take about 1-2 minutes (game save 39-73 s). 270 s is the hard
+# limit; after that systemd gives up and Docker stops whatever is left.
+TimeoutStopSec=270
+
+[Install]
+WantedBy=multi-user.target
