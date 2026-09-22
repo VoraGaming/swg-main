@@ -301,6 +301,66 @@ sync_runtime_config_files() {
     fi
 }
 
+# Fill in the external-auth shared secret at start, so the real value is never
+# stored in git. The configs repo only holds the token EXTERNALAUTHSECRET on the
+# "externalAuthSecretKey=" line of servercommon.cfg. The real value comes from
+# the SWG_EXTERNAL_AUTH_SECRET environment variable (set from the .env key
+# SWG_AUTH_EXTERNAL_AUTH_SECRET in the compose override file).
+#
+# The whole line is rewritten on every start (not only the token), so a changed
+# secret in .env takes effect after a container restart. The value is never
+# printed. If external auth is turned on but the secret is missing, stop with an
+# error instead of starting a server nobody can log in to.
+write_external_auth_secret() {
+    local cfg="exe/linux/servercommon.cfg"
+    local local_cfg="exe/linux/localOptions.cfg"
+    local tmp="${cfg}.docker-tmp"
+    local external_auth=""
+
+    if [ ! -f "${cfg}" ]; then
+        echo "External auth: ${cfg} not found." >&2
+        exit 1
+    fi
+
+    # Is external auth on? localOptions.cfg is read after servercommon.cfg, so
+    # the last active (not commented) useExternalAuth= line of the two wins.
+    external_auth="$(cat "${cfg}" "${local_cfg}" 2>/dev/null \
+        | tr -d '\r' \
+        | grep -E '^[[:space:]]*useExternalAuth[[:space:]]*=' \
+        | tail -n 1 \
+        | sed -E 's/^[^=]*=[[:space:]]*//; s/[[:space:]]*$//' \
+        | tr '[:upper:]' '[:lower:]' || true)"
+
+    if [ -z "${SWG_EXTERNAL_AUTH_SECRET:-}" ]; then
+        if [ "${external_auth}" = "true" ] || [ "${external_auth}" = "1" ]; then
+            echo "ERROR: useExternalAuth is on, but SWG_EXTERNAL_AUTH_SECRET is empty." >&2
+            echo "Set SWG_AUTH_EXTERNAL_AUTH_SECRET in .env and pass it to swg-server as" >&2
+            echo "SWG_EXTERNAL_AUTH_SECRET (docker-compose.override.yml), then start again." >&2
+            exit 1
+        fi
+        echo "External auth is off and no secret is set; leaving ${cfg} as it is."
+        return 0
+    fi
+
+    if ! tr -d '\r' < "${cfg}" | grep -qE '^externalAuthSecretKey='; then
+        echo "ERROR: SWG_EXTERNAL_AUTH_SECRET is set, but ${cfg} has no externalAuthSecretKey= line." >&2
+        echo "The exe (configs) checkout is probably not the VoraGaming/configs version." >&2
+        exit 1
+    fi
+
+    # awk reads the secret from the environment (ENVIRON), so characters such
+    # as / & \ in the secret are copied as-is (sed would treat them specially).
+    awk '
+        { sub(/\r$/, "") }
+        /^externalAuthSecretKey=/ { print "externalAuthSecretKey=" ENVIRON["SWG_EXTERNAL_AUTH_SECRET"]; next }
+        { print }
+    ' "${cfg}" > "${tmp}"
+    # "cat >" keeps the original file's owner and permissions (mv would not).
+    cat "${tmp}" > "${cfg}"
+    rm -f "${tmp}"
+    echo "External auth: secret written to ${cfg} (value not shown)."
+}
+
 stage_client_asset_tree() {
     local source="${SWG_CLIENT_ASSETS_TRE}"
     local target_dir="${SWG_WORK_DIR}/client-assets"
@@ -519,6 +579,7 @@ run_server() {
         set_cluster_public_address
     fi
 
+    write_external_auth_secret
     start_station_chat
     exec bash startServer.sh
 }
