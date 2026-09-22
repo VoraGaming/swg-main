@@ -183,3 +183,171 @@ Watch out: `disable --now` **stops the game stack** (with a save). Afterwards
 start it again with `cd ~/swg-main && docker compose start`, because the
 stopped containers will not start by themselves. The Proxmox timeout can
 stay at 360 (it is only a ceiling).
+
+# Weekly log cleanup
+
+## What it does
+
+The game server writes log files inside the `swg-server` container, and
+nothing ever makes them smaller. `swg-log-cleanup.sh` (in this folder) checks
+them once a week and **empties** (sets to 0 bytes) any file bigger than
+**200 MB**. It never deletes a file and never touches anything else.
+
+Files it checks (all inside the `swg-server` container):
+
+- every file directly in `/swg-main/exe/linux/logs/` (`customerService.log`,
+  `startupLog.log`, `taskProcessDied.txt`, `persistence.log`)
+- `/swg-main/stationchat.log` and `/swg-main/chat/var/log/swgchat.log` (chat
+  server logs)
+
+Good to know:
+
+- If `swg-server` is not running, it prints "Nothing to do" and stops.
+- It is safe to run while the game is running. It does not stop, restart or
+  slow down the game, and has no effect on saving.
+- An emptied file loses its old lines. If you need an old log, copy it out
+  before Sunday 04:00.
+- The limit can be changed with `SWG_LOG_MAX_MB` (see "Run it once by hand").
+- `swgchat.log` only: it is not confirmed that the chat server keeps writing
+  from the start of the file after it is emptied. If it does not, the file
+  shows its old size again with empty space at the start. That is only an
+  odd-looking text log; game data and saves are not affected.
+- Every run adds 1-5 lines to `~/swg-log-cleanup.log`. Times in it are UTC
+  (one hour behind UK time in summer).
+
+Runs as the normal `swg` user from **your own crontab**. **No sudo is
+needed anywhere in this section.**
+
+## Before you start
+
+1. Log in to the server as `swg`.
+2. Check the script is on the server (swg-server-ops updates `~/swg-main` with
+   `git pull`):
+
+   ```
+   ls -l ~/swg-main/docker/host/swg-log-cleanup.sh
+   ```
+
+   It must print one line ending in `swg-log-cleanup.sh`. If it says
+   "No such file or directory", stop and ask.
+3. Check the cron service is running:
+
+   ```
+   systemctl is-active cron
+   ```
+
+   It must print `active`. If it prints anything else, stop and ask.
+
+## Install (run as `swg` on the server)
+
+1. Make a `bin` folder in your home folder (no error if it already exists):
+
+   ```
+   mkdir -p ~/bin
+   ```
+
+2. Copy the script there and make it runnable:
+
+   ```
+   cp ~/swg-main/docker/host/swg-log-cleanup.sh ~/bin/swg-log-cleanup.sh
+   chmod +x ~/bin/swg-log-cleanup.sh
+   ```
+
+   Why a copy: cron keeps running the same file even while `~/swg-main` is
+   being updated. If the script in `~/swg-main` changes later, repeat this
+   step to update the copy.
+
+3. Run it once by hand to check it works:
+
+   ```
+   ~/bin/swg-log-cleanup.sh
+   ```
+
+   Expected, when all logs are small: one line like
+   `2026-09-27 03:00:01 UTC done: limit 200 MB, 0 file(s) emptied, 0 failed.`
+   If you see `ERROR`, stop and ask.
+
+4. Add the weekly job to your crontab:
+
+   ```
+   crontab -e
+   ```
+
+   - The first time, it may ask you to "Select an editor". Type the number
+     next to `nano` (usually `1`) and press Enter.
+   - In the editor, go to the very end of the file (arrow keys) and add this
+     as **one new line**, exactly as written:
+
+     ```
+     0 4 * * 0 $HOME/bin/swg-log-cleanup.sh >> $HOME/swg-log-cleanup.log 2>&1
+     ```
+
+   - In nano: press `Ctrl+O`, then Enter to save, then `Ctrl+X` to leave.
+   - It should print `crontab: installing new crontab`.
+
+   What the line means: at minute `0`, hour `4`, any day of the month, any
+   month, on day-of-week `0` (Sunday), run the script and add its output to
+   `~/swg-log-cleanup.log`. The time is the server's clock, which is UK time
+   (BST in summer, GMT in winter), so this is Sunday 04:00 UK time.
+
+   Watch out: add the line only **once**. If `crontab` says you are "not
+   allowed" to use it, stop and ask.
+
+## Check it
+
+- See that the job is installed:
+
+  ```
+  crontab -l
+  ```
+
+  The `0 4 * * 0 ...swg-log-cleanup.sh...` line must be there exactly once.
+- After the first Sunday, see what it did:
+
+  ```
+  tail -n 20 ~/swg-log-cleanup.log
+  ```
+
+  Each run ends with a `done: limit 200 MB, ...` line. Emptied files show
+  as `emptied <file> (was <size> MB, ...)`.
+- See the current log sizes yourself (read-only):
+
+  ```
+  docker exec swg-server ls -l /swg-main/exe/linux/logs
+  ```
+
+## Run it once by hand
+
+Any time, with the normal 200 MB limit:
+
+```
+~/bin/swg-log-cleanup.sh
+```
+
+With a different limit, for that one run only (example: 50 MB):
+
+```
+SWG_LOG_MAX_MB=50 ~/bin/swg-log-cleanup.sh
+```
+
+The number must be a whole number of MB above 0.
+
+## Uninstall
+
+1. Remove the cron line:
+
+   ```
+   crontab -e
+   ```
+
+   Delete the `0 4 * * 0 ...swg-log-cleanup.sh...` line (in nano, put the
+   cursor on it and press `Ctrl+K`), then `Ctrl+O`, Enter, `Ctrl+X`. Check
+   with `crontab -l` that the line is gone.
+2. Remove the copy of the script and (optional) its output file:
+
+   ```
+   rm ~/bin/swg-log-cleanup.sh
+   rm ~/swg-log-cleanup.log
+   ```
+
+The game logs themselves stay as they are.
